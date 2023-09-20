@@ -56,7 +56,7 @@ class CustomBuildExtCommand(build_ext):
 if __name__ == "__main__":
     setup(
         name=DISTNAME,
-        # cmdclass={"build_ext": CustomBuildExtCommand},
+        cmdclass={"build_ext": CustomBuildExtCommand},
         maintainer=MAINTAINER,
         maintainer_email=MAINTAINER_EMAIL,
         packages=find_packages(),
@@ -80,6 +80,6 @@ if __name__ == "__main__":
             "Operating System :: MacOS",
         ],
         install_requires=["numpy", "scipy", "scikit-learn>=0.22", "six"],
-        setup_requires=["Cython>=0.23", "numpy", "setuptools>=18"],
-        # ext_modules=extensions,
+        setup_requires=["Cython>=0.23,<3.0.0", "numpy", "setuptools>=18"],
+        ext_modules=extensions,
     )
