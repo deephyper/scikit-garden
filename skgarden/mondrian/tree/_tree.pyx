@@ -884,7 +884,7 @@ cdef class Tree:
         """Finds the terminal region (=leaf node) for each sample in X."""
         return self._apply_dense(X)
 
-    cpdef tuple predict(self, object X, bint return_std=False, bint is_regression=True):
+    cpdef tuple predict(self, object X, bint return_std=False, bint is_regression=True, bint disentangled_std=False):
         """Predicts the regressor and standard deviation for all samples."""
 
         # Check input
@@ -912,6 +912,8 @@ cdef class Tree:
         # Initialize output
         cdef np.ndarray[DTYPE_t, ndim=1] mean = np.zeros(n_samples, dtype=DTYPE)
         cdef np.ndarray[DTYPE_t, ndim=1] std = np.zeros(n_samples, dtype=DTYPE)
+        cdef np.ndarray[DTYPE_t, ndim=1] std_al = np.zeros(n_samples, dtype=DTYPE)
+        cdef np.ndarray[DTYPE_t, ndim=1] std_ep = np.zeros(n_samples, dtype=DTYPE)
 
         cdef SIZE_t n_classes = node_values.shape[1]
         cdef np.ndarray[DTYPE_t, ndim=2] proba = np.zeros((n_samples, n_classes), dtype=DTYPE)
@@ -989,11 +991,18 @@ cdef class Tree:
                     std[i] -= mean[i]**2
                     if std[i] <= 0:
                         std[i] = 0.0
-                    std[i] = sqrt(std[i])
+                    if disentangled_std:
+                        std_ep[i] = sqrt((1-w_j)*std[i])
+                        std_al[i] = sqrt(w_j*std[i])
+                    else:
+                        std[i] = sqrt(std[i])
 
         if is_regression:
             if return_std:
-                return mean, std
+                if disentangled_std:
+                    return mean, std_al, std_ep
+                else:
+                    return mean, std
             return mean,
         else:
             return proba,

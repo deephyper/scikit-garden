@@ -234,7 +234,7 @@ class BaseDecisionTree(six.with_metaclass(ABCMeta, BaseEstimator)):
 
         return X
 
-    def predict(self, X, check_input=True, return_std=False):
+    def predict(self, X, check_input=True, return_std=False, disentangled_std=False):
         """Predict class or regression value for X.
 
         For a classification model, the predicted class for each sample in X is
@@ -270,7 +270,7 @@ class BaseDecisionTree(six.with_metaclass(ABCMeta, BaseEstimator)):
         # Regression
         else:
             mean_and_std = self.tree_.predict(
-                X, return_std=return_std, is_regression=True)
+                X, return_std=return_std, is_regression=True, disentangled_std=disentangled_std)
             if return_std:
                 return mean_and_std
             return mean_and_std[0]

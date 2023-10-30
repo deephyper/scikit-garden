@@ -4,15 +4,11 @@ from sklearn.base import ClassifierMixin
 from sklearn.exceptions import NotFittedError
 from sklearn.preprocessing import LabelEncoder
 from sklearn.utils import check_random_state
-from sklearn.utils.validation import check_array
-from sklearn.utils.validation import check_X_y
-from joblib import delayed, Parallel
+from sklearn.utils.validation import check_array, check_X_y
 
-from ..tree import MondrianTreeClassifier
-from ..tree import MondrianTreeRegressor
+from ...forest import ForestClassifier, ForestRegressor
+from ..tree import MondrianTreeClassifier, MondrianTreeRegressor
 
-from ...forest import ForestClassifier
-from ...forest import ForestRegressor
 
 def _single_tree_pfit(tree, X, y, classes=None):
     if classes is not None:
@@ -20,6 +16,7 @@ def _single_tree_pfit(tree, X, y, classes=None):
     else:
         tree.partial_fit(X, y)
     return tree
+
 
 class BaseMondrian(object):
     def weighted_decision_path(self, X):
@@ -45,10 +42,10 @@ class BaseMondrian(object):
             provides the weighted_decision_path of estimator i
         """
         X = self._validate_X_predict(X)
-        est_inds = np.cumsum(
-            [0] + [est.tree_.node_count for est in self.estimators_])
+        est_inds = np.cumsum([0] + [est.tree_.node_count for est in self.estimators_])
         paths = sparse.hstack(
-            [est.weighted_decision_path(X) for est in self.estimators_]).tocsr()
+            [est.weighted_decision_path(X) for est in self.estimators_]
+        ).tocsr()
         return paths, est_inds
 
     # XXX: This is mainly a stripped version of BaseForest.fit
@@ -97,10 +94,13 @@ class BaseMondrian(object):
 
         y = np.atleast_1d(y)
         if y.ndim == 2 and y.shape[1] == 1:
-            warn("A column-vector y was passed when a 1d array was"
-                 " expected. Please change the shape of y to "
-                 "(n_samples,), for example using ravel().",
-                 DataConversionWarning, stacklevel=2)
+            warn(
+                "A column-vector y was passed when a 1d array was"
+                " expected. Please change the shape of y to "
+                "(n_samples,), for example using ravel().",
+                DataConversionWarning,
+                stacklevel=2,
+            )
 
         self.n_outputs_ = 1
 
@@ -117,10 +117,12 @@ class BaseMondrian(object):
         # XXX: Switch to threading backend when GIL is released.
         if isinstance(self, ClassifierMixin):
             self.estimators_ = Parallel(n_jobs=self.n_jobs, verbose=self.verbose)(
-                delayed(_single_tree_pfit)(t, X, y, classes) for t in self.estimators_)
+                delayed(_single_tree_pfit)(t, X, y, classes) for t in self.estimators_
+            )
         else:
             self.estimators_ = Parallel(n_jobs=self.n_jobs, verbose=self.verbose)(
-                delayed(_single_tree_pfit)(t, X, y) for t in self.estimators_)
+                delayed(_single_tree_pfit)(t, X, y) for t in self.estimators_
+            )
 
         return self
 
@@ -156,26 +158,33 @@ class MondrianForestRegressor(ForestRegressor, BaseMondrian):
         If None, the random number generator is the RandomState instance used
         by `np.random`.
     """
-    def __init__(self,
-                 n_estimators=10,
-                 max_depth=None,
-                 min_samples_split=2,
-                 bootstrap=False,
-                 n_jobs=1,
-                 random_state=None,
-                 verbose=0):
+
+    def __init__(
+        self,
+        n_estimators=100,
+        max_depth=None,
+        min_samples_split=10,
+        bootstrap=False,
+        n_jobs=1,
+        random_state=None,
+        verbose=0,
+        max_samples=None,
+    ):
         super(MondrianForestRegressor, self).__init__(
-            base_estimator=MondrianTreeRegressor(),
+            estimator=MondrianTreeRegressor(),
             n_estimators=n_estimators,
-            estimator_params=("max_depth", "min_samples_split",
-                              "random_state"),
+            estimator_params=("max_depth", "min_samples_split", "random_state"),
             bootstrap=bootstrap,
             n_jobs=n_jobs,
             random_state=random_state,
-            verbose=verbose)
+            verbose=verbose,
+            max_samples=max_samples,
+        )
 
         self.max_depth = max_depth
         self.min_samples_split = min_samples_split
+        self.criterion = "squared_error"
+        self.max_samples = max_samples
 
     def fit(self, X, y):
         """Builds a forest of trees from the training set (X, y).
@@ -201,10 +210,12 @@ class MondrianForestRegressor(ForestRegressor, BaseMondrian):
         self : object
             Returns self.
         """
+        if np.ndim(y) == 2 and np.shape(y)[1] == 1:
+            y = np.ravel(y)
         X, y = check_X_y(X, y, dtype=np.float32, multi_output=False)
         return super(MondrianForestRegressor, self).fit(X, y)
 
-    def predict(self, X, return_std=False):
+    def predict(self, X, return_std=False, disentangled_std=False):
         """
         Returns the predicted mean and std.
 
@@ -225,6 +236,9 @@ class MondrianForestRegressor(ForestRegressor, BaseMondrian):
         return_std : boolean, default (False)
             Whether or not to return the standard deviation.
 
+        disentangled_std : boolean, default (False)
+            Wheter the standard deviation is disentangled into aleatoric and epistemic uncertainty.
+
         Returns
         -------
         y : array-like, shape = (n_samples,)
@@ -236,26 +250,71 @@ class MondrianForestRegressor(ForestRegressor, BaseMondrian):
         X = check_array(X)
         if not hasattr(self, "estimators_"):
             raise NotFittedError("The model has to be fit before prediction.")
-        ensemble_mean = np.zeros(X.shape[0])
-        exp_y_sq = np.zeros_like(ensemble_mean)
 
+        # Array allocation
+        ensemble_mean = np.zeros(X.shape[0])
+        if return_std:
+            if disentangled_std:
+                std_al = np.zeros_like(ensemble_mean)
+                std_ep = np.zeros_like(ensemble_mean)
+            else:
+                exp_y_sq = np.zeros_like(ensemble_mean)
+
+        # Collecting quantities
         for est in self.estimators_:
             if return_std:
-                mean, std = est.predict(X, return_std=True)
-                exp_y_sq += (std**2 + mean**2)
+                if disentangled_std:
+                    mean, std_al_tree, std_ep_tree = est.predict(X, return_std=True, disentangled_std=True)
+                    # TODO: v1
+                    std_al += std_al_tree**2
+                    std_ep += mean**2 + std_ep_tree**2
+                    # TODO: v2 (removes epistemic uncertainty between trees just keep epistemic from each tree)
+                    # std_al += std_al_tree**2
+                    # std_ep += std_ep_tree**2
+                else:
+                    mean, std = est.predict(X, return_std=True)
+                    # TODO: v1
+                    exp_y_sq += std**2 + mean**2
+                    # TODO: v2
+                    # exp_y_sq += std**2 
             else:
                 mean = est.predict(X, return_std=False)
             ensemble_mean += mean
 
         ensemble_mean /= len(self.estimators_)
-        exp_y_sq /= len(self.estimators_)
 
-        if not return_std:
+        if return_std:
+            if disentangled_std:
+                # TODO: v1
+                # Aleatoric Variance
+                std_al /= len(self.estimators_)
+                std_al **= 0.5
+
+                # Epistemic Variance
+                std_ep = std_ep / len(self.estimators_) - ensemble_mean**2
+                std_ep[std_ep <= 0.0] = 0.0
+                std_ep **= 0.5
+
+                # TODO: v2 
+                # std_al /= len(self.estimators_)
+                # std_ep /= len(self.estimators_)
+                # std_al **= 0.5
+                # std_ep **= 0.5
+
+                return ensemble_mean, std_al, std_ep
+            else:
+                exp_y_sq /= len(self.estimators_)
+
+                # TODO: v1
+                std = exp_y_sq - ensemble_mean**2
+                # TODO: v2
+                # std = exp_y_sq
+
+                std[std <= 0.0] = 0.0
+                std **= 0.5
+                return ensemble_mean, std
+        else:
             return ensemble_mean
-        std = exp_y_sq - ensemble_mean**2
-        std[std <= 0.0] = 0.0
-        std **= 0.5
-        return ensemble_mean, std
 
     def partial_fit(self, X, y):
         """
@@ -314,23 +373,26 @@ class MondrianForestClassifier(ForestClassifier, BaseMondrian):
         If None, the random number generator is the RandomState instance used
         by `np.random`.
     """
-    def __init__(self,
-                 n_estimators=10,
-                 max_depth=None,
-                 min_samples_split=2,
-                 bootstrap=False,
-                 n_jobs=1,
-                 random_state=None,
-                 verbose=0):
+
+    def __init__(
+        self,
+        n_estimators=10,
+        max_depth=None,
+        min_samples_split=2,
+        bootstrap=False,
+        n_jobs=1,
+        random_state=None,
+        verbose=0,
+    ):
         super(MondrianForestClassifier, self).__init__(
             base_estimator=MondrianTreeClassifier(),
             n_estimators=n_estimators,
-            estimator_params=("max_depth", "min_samples_split",
-                              "random_state"),
+            estimator_params=("max_depth", "min_samples_split", "random_state"),
             bootstrap=bootstrap,
             n_jobs=n_jobs,
             random_state=random_state,
-            verbose=verbose)
+            verbose=verbose,
+        )
 
         self.max_depth = max_depth
         self.min_samples_split = min_samples_split
@@ -385,5 +447,4 @@ class MondrianForestClassifier(ForestClassifier, BaseMondrian):
         -------
         self: instance of MondrianForestClassifier
         """
-        return super(MondrianForestClassifier, self).partial_fit(
-            X, y, classes=classes)
+        return super(MondrianForestClassifier, self).partial_fit(X, y, classes=classes)
